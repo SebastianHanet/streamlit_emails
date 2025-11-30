@@ -8,21 +8,22 @@ This variant lets you:
   * Type a single subject line and email body
   * Either send all emails immediately OR schedule them to be sent later
   * Automatically attach your resume PDF to every email
+  * Require a safety password before any emails are sent
 
 Before running this app, make sure you have the following installed:
 
     pip install streamlit pandas openpyxl python-dotenv
 
-You should also create a ``.env`` file in the same directory with the
-following environment variables defined (these are used as defaults in
-the UI but can be changed in the sidebar):
+For deployment (including Streamlit Community Cloud), set secrets in
+``.env`` or ``.streamlit/secrets.toml`` so they stay on the server and
+are never embedded in the client:
 
-    SENDER_EMAIL=<your email address>
-    SMTP_HOST=<your SMTP server>
-    SMTP_PORT=<SMTP port, e.g. 587>
-    SMTP_USER=<SMTP username>
-    SMTP_PASS=<SMTP password or app password>
-    USE_STARTTLS=True
+    SMTP_HOST=<your SMTP server>              # optional server-side default
+    SMTP_PORT=<SMTP port, e.g. 587>           # optional server-side default
+    SMTP_USER=<SMTP username>                 # optional server-side default
+    SMTP_PASS=<SMTP password or app password> # optional server-side default
+    USE_STARTTLS=True                         # optional server-side default
+    OUTREACH_PASSWORD=<access code required before sending>  # required
 
 Additionally, place your resume PDF (the file that will be attached to
 every email) in the same folder as this script and set the
@@ -30,7 +31,7 @@ every email) in the same folder as this script and set the
 
 To run the app:
 
-    streamlit run streamlit_app.py
+    streamlit run streamlit_app2.py
 """
 
 import os
@@ -52,16 +53,39 @@ load_dotenv()
 RESUME_FILENAME = "Sebastian Hanet Resume 2025.pdf"
 
 
+def get_config_value(key: str, default: str = "") -> str:
+    """Retrieve a secret or env var without exposing it to the UI."""
+    try:
+        return str(st.secrets[key])
+    except Exception:
+        return os.getenv(key, default)
+
+
+def str_to_bool(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+# Safety password required before sending/scheduling emails (must be set in secrets)
+OUTREACH_PASSWORD = get_config_value("OUTREACH_PASSWORD", "")
+
+
 # ---- Utilities ----
 def load_credentials_from_env() -> dict:
     """Load default SMTP creds/settings from environment."""
+    port_raw = get_config_value("SMTP_PORT", "587")
+    try:
+        smtp_port = int(port_raw)
+    except (TypeError, ValueError):
+        smtp_port = 587
+
     return {
-        "smtp_host": os.getenv("SMTP_HOST", ""),
-        "smtp_port": int(os.getenv("SMTP_PORT", "587")),
-        "smtp_user": os.getenv("SMTP_USER", ""),
-        "smtp_pass": os.getenv("SMTP_PASS", ""),
-        "sender_email": os.getenv("SENDER_EMAIL", ""),
-        "use_starttls": os.getenv("USE_STARTTLS", "True").lower() == "true",
+        "smtp_host": get_config_value("SMTP_HOST", ""),
+        "smtp_port": smtp_port,
+        "smtp_user": get_config_value("SMTP_USER", ""),
+        "smtp_pass": get_config_value("SMTP_PASS", ""),
+        # Do not auto-populate sender to avoid embedding addresses in the UI
+        "sender_email": "",
+        "use_starttls": str_to_bool(get_config_value("USE_STARTTLS", "True")),
     }
 
 
@@ -220,28 +244,43 @@ def main() -> None:
         "or schedule it for later."
     )
 
+    if not OUTREACH_PASSWORD:
+        st.error(
+            "The app is locked until you set an OUTREACH_PASSWORD in "
+            "Streamlit secrets or a .env file on the server."
+        )
+        return
+
     # Sidebar: SMTP configuration
     default_creds = load_credentials_from_env()
     st.sidebar.header("SMTP Settings")
-    smtp_host = st.sidebar.text_input(
-        "SMTP host", value=default_creds["smtp_host"], help="e.g. smtp.gmail.com"
+    smtp_host_input = st.sidebar.text_input(
+        "SMTP host", value="", placeholder="smtp.gmail.com", help="e.g. smtp.gmail.com"
     )
-    smtp_port = st.sidebar.number_input(
-        "SMTP port", value=default_creds["smtp_port"], step=1, format="%d"
+    smtp_port_input = st.sidebar.number_input(
+        "SMTP port", value=default_creds["smtp_port"] or 587, step=1, format="%d"
     )
-    use_starttls = st.sidebar.checkbox(
+    use_starttls_input = st.sidebar.checkbox(
         "Use STARTTLS", value=default_creds["use_starttls"]
     )
-    smtp_user = st.sidebar.text_input(
-        "SMTP username", value=default_creds["smtp_user"]
+    smtp_user_input = st.sidebar.text_input(
+        "SMTP username", value="", placeholder="you@example.com"
     )
-    smtp_pass = st.sidebar.text_input(
+    smtp_pass_input = st.sidebar.text_input(
         "SMTP password / app password",
-        value=default_creds["smtp_pass"],
+        value="",
         type="password",
     )
-    sender_email = st.sidebar.text_input(
-        "From address", value=default_creds["sender_email"]
+    sender_email_input = st.sidebar.text_input(
+        "From address",
+        value="",
+        placeholder="you@example.com",
+        help="Required each time to avoid embedding your address in the app.",
+    )
+    st.sidebar.caption(
+        "Sensitive fields are never pre-filled. If SMTP_* secrets exist on the server, "
+        "they are used when inputs are left blank (except the From address, which must "
+        "always be provided manually)."
     )
 
     # Optional: quick SMTP sanity hint for Gmail
@@ -322,6 +361,13 @@ def main() -> None:
         help="This content will be sent to every recipient in the selected column.",
     )
 
+    # Safety password input
+    outreach_password = st.text_input(
+        "Outreach password (required to send emails)",
+        type="password",
+        help="Enter the safety password before bulk sending.",
+    )
+
     # Send now vs schedule
     send_mode = st.radio(
         "When should these emails be sent?",
@@ -342,9 +388,32 @@ def main() -> None:
         )
 
     if st.button("Create and send emails", type="primary"):
+        sender_email = sender_email_input.strip()
+        smtp_host = smtp_host_input.strip() or default_creds["smtp_host"]
+        smtp_port = int(smtp_port_input or default_creds["smtp_port"] or 0)
+        use_starttls = bool(use_starttls_input)
+        smtp_user = smtp_user_input.strip() or default_creds["smtp_user"]
+        smtp_pass = smtp_pass_input.strip() or default_creds["smtp_pass"]
+
         # Basic validation
         if not sender_email or "@" not in sender_email:
             st.error("Please set a valid 'From' address in the sidebar.")
+            return
+
+        if not smtp_host:
+            st.error("Please provide an SMTP host (or set SMTP_HOST in secrets).")
+            return
+
+        if smtp_port <= 0:
+            st.error("Please provide a valid SMTP port.")
+            return
+
+        if not smtp_user:
+            st.error("Please provide an SMTP username or set SMTP_USER in secrets.")
+            return
+
+        if not smtp_pass:
+            st.error("Please provide an SMTP password or set SMTP_PASS in secrets.")
             return
 
         if email_column not in df.columns:
@@ -357,6 +426,11 @@ def main() -> None:
 
         if not body.strip():
             st.error("Please provide an email body.")
+            return
+
+        # Password check
+        if outreach_password != OUTREACH_PASSWORD:
+            st.error("Incorrect outreach password. Emails were not sent.")
             return
 
         if send_mode == "Send now":
