@@ -31,7 +31,7 @@ every email) in the same folder as this script and set the
 
 To run the app:
 
-    streamlit run streamlit_app2.py
+    streamlit run streamlit_app.py
 """
 
 import os
@@ -39,6 +39,7 @@ import threading
 import time as time_module
 from datetime import datetime
 from email.message import EmailMessage
+from pathlib import Path
 from typing import Tuple, List
 
 import pandas as pd
@@ -46,8 +47,10 @@ import smtplib
 import streamlit as st
 from dotenv import load_dotenv
 
-# Load environment variables from .env if present
-load_dotenv()
+# Load environment variables from a .env that lives next to this script
+BASE_DIR = Path(__file__).resolve().parent
+DOTENV_PATH = BASE_DIR / ".env"
+load_dotenv(DOTENV_PATH)
 
 # ---- Config ----
 RESUME_FILENAME = "Sebastian Hanet Resume 2025.pdf"
